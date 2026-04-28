@@ -23,9 +23,24 @@ import { useNavigate } from "@tanstack/react-router";
 import { X, ArrowLeft } from "lucide-react";
 import { ContactActions } from "@/components/ui/ContactActions";
 
-/* ---------------- helpers: UTM + 10-min phone lock ---------------- */
+/* ---------------- helpers: UTM + 10-min phone lock + device lock ---------------- */
 
 const PHONE_LOCK_MIN = 10;
+const DEVICE_ID_KEY = "_device_id";
+
+function getOrCreateDeviceId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    let id = localStorage.getItem(DEVICE_ID_KEY);
+    if (!id) {
+      id = "dev_" + Date.now() + "_" + Math.random().toString(36).slice(2, 11);
+      localStorage.setItem(DEVICE_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return "";
+  }
+}
 
 function readUtm(): Record<string, string> {
   if (typeof window === "undefined") return {};
@@ -58,6 +73,30 @@ function setPhoneLock(kind: "lead" | "order", phone: string) {
   if (typeof window === "undefined" || !phone) return;
   try {
     localStorage.setItem(`_lock_${kind}_${phone}`, String(Date.now()));
+  } catch {
+    /* ignore */
+  }
+}
+
+function deviceLocked(kind: "order"): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const deviceId = getOrCreateDeviceId();
+    if (!deviceId) return false;
+    const key = `_lock_${kind}_device_${deviceId}`;
+    const ts = Number(localStorage.getItem(key) || 0);
+    return ts > 0 && Date.now() - ts < PHONE_LOCK_MIN * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
+function setDeviceLock(kind: "order") {
+  if (typeof window === "undefined") return;
+  try {
+    const deviceId = getOrCreateDeviceId();
+    if (!deviceId) return;
+    localStorage.setItem(`_lock_${kind}_device_${deviceId}`, String(Date.now()));
   } catch {
     /* ignore */
   }
@@ -237,12 +276,11 @@ export function OrderPopup() {
       return setError(msg);
     }
 
-    // 10-min duplicate-order phone lock — don't double-charge attribution
-    if (phoneLocked("order", phone)) {
-      // Still navigate to thank-you so user sees confirmation
-      closeOrder();
-      navigate({ to: "/thank-you" });
-      return;
+    // 10-min duplicate-order phone lock or device lock — don't double-charge attribution
+    if (phoneLocked("order", phone) || deviceLocked("order")) {
+      const msg = "আপনি ইতিমধ্যে অর্ডার করেছেন। ১০ মিনিট পর আবার চেষ্টা করুন।";
+      trackOrderValidationError("lock", msg);
+      return setError(msg);
     }
 
     // Push hashed identity to enable Pixel Advanced Matching + CAPI EMQ boost
@@ -293,6 +331,7 @@ export function OrderPopup() {
     // Push the order row to Sheets (Orders tab) — fire-and-forget
     postToSheets(orderPayload);
     setPhoneLock("order", phone);
+    setDeviceLock("order");
 
     // Persist transaction context for thank-you page. Purchase fires THERE
     // (per spec: "Purchase fires only on thank-you/order_success").
